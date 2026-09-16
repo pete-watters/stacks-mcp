@@ -1,11 +1,11 @@
-"""MCP application and tool registration."""
+"""MCP application: tool, resource and prompt registration."""
 
 from __future__ import annotations
 
-import asyncio
-
-from mcp.server.mcpserver import MCPServer
-from mcp.server.mcpserver.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer, Message, UserMessage
+from mcp.server.mcpserver.exceptions import ResourceError, ToolError
+from mcp.shared.exceptions import MCPError
+from mcp.types import INVALID_PARAMS
 
 from stacks_mcp import __version__
 from stacks_mcp.clients.hiro import HiroTransactionEvent
@@ -15,21 +15,28 @@ from stacks_mcp.decoders.btc import decode_btc_transaction
 from stacks_mcp.decoders.stacks import decode_stacks_transaction
 from stacks_mcp.errors import InvalidAddressError, InvalidTxidError, UpstreamError
 from stacks_mcp.models import (
+    AddressSummary,
     BtcBalance,
     Chain,
     RecentTransactions,
     StxBalance,
-    TokenBalance,
     TokenBalances,
     TransactionExplanation,
-    TransactionSummary,
 )
-from stacks_mcp.tokens import build_token_balance, has_unknown_decimals, resolve_metadata
-from stacks_mcp.transactions import btc_transaction_summary, stx_transaction_summary
+from stacks_mcp.queries import (
+    SUMMARY_TRANSACTION_LIMIT,
+    fetch_address_summary,
+    fetch_btc_balance,
+    fetch_btc_transactions,
+    fetch_stx_balance,
+    fetch_stx_transactions,
+    fetch_token_balances,
+)
 from stacks_mcp.validation import validate_btc_address, validate_stx_principal, validate_txid
 
 MAX_TRANSACTION_LIMIT = 50
 NOT_FOUND = 404
+ADDRESS_SUMMARY_URI = "stacks://address/{address}/summary"
 
 mcp = MCPServer(
     "stacks-mcp",
@@ -58,15 +65,9 @@ async def get_btc_balance(address: str) -> BtcBalance:
     except InvalidAddressError as exc:
         raise ToolError(str(exc)) from exc
     try:
-        raw = await get_client().get_address(clean)
+        return await fetch_btc_balance(clean)
     except UpstreamError as exc:
         raise ToolError(str(exc)) from exc
-    return BtcBalance.build(
-        address=raw.address,
-        confirmed_sats=raw.chain_stats.balance_sats,
-        unconfirmed_sats=raw.mempool_stats.balance_sats,
-        tx_count=raw.chain_stats.tx_count,
-    )
 
 
 @mcp.tool()
@@ -86,19 +87,10 @@ async def get_stx_balance(address: str) -> StxBalance:
         principal = validate_stx_principal(address)
     except InvalidAddressError as exc:
         raise ToolError(str(exc)) from exc
-    client = get_hiro_client()
     try:
-        balance, nonces = await asyncio.gather(
-            client.get_stx_balance(principal), client.get_nonces(principal)
-        )
+        return await fetch_stx_balance(principal)
     except UpstreamError as exc:
         raise ToolError(str(exc)) from exc
-    return StxBalance.build(
-        address=principal,
-        balance_ustx=balance.balance_ustx,
-        locked_ustx=balance.locked_ustx,
-        nonce=nonces.next_nonce,
-    )
 
 
 @mcp.tool()
@@ -121,18 +113,10 @@ async def get_token_balances(address: str) -> TokenBalances:
         principal = validate_stx_principal(address)
     except InvalidAddressError as exc:
         raise ToolError(str(exc)) from exc
-    client = get_hiro_client()
     try:
-        positions = await client.get_ft_balances(principal)
-        tokens: list[TokenBalance] = []
-        unknown = 0
-        for position in positions.results:
-            metadata = await resolve_metadata(client, position.contract_id)
-            unknown += 1 if has_unknown_decimals(metadata) else 0
-            tokens.append(build_token_balance(position.contract_id, position.balance, metadata))
+        return await fetch_token_balances(principal)
     except UpstreamError as exc:
         raise ToolError(str(exc)) from exc
-    return TokenBalances.build(address=principal, tokens=tokens, unknown=unknown)
 
 
 @mcp.tool()
@@ -156,28 +140,23 @@ async def get_recent_transactions(
     """
     if limit < 1 or limit > MAX_TRANSACTION_LIMIT:
         raise ToolError(f"limit must be between 1 and {MAX_TRANSACTION_LIMIT}, got {limit}")
-    summaries: list[TransactionSummary]
     if chain == "btc":
         try:
             clean = validate_btc_address(address)
         except InvalidAddressError as exc:
             raise ToolError(str(exc)) from exc
         try:
-            txs = await get_client().get_address_txs(clean)
+            return await fetch_btc_transactions(clean, limit)
         except UpstreamError as exc:
             raise ToolError(str(exc)) from exc
-        summaries = [btc_transaction_summary(tx, clean) for tx in txs[:limit]]
-        return RecentTransactions.build(address=clean, chain=chain, transactions=summaries)
     try:
         principal = validate_stx_principal(address)
     except InvalidAddressError as exc:
         raise ToolError(str(exc)) from exc
     try:
-        page = await get_hiro_client().get_transactions(principal, limit)
+        return await fetch_stx_transactions(principal, limit)
     except UpstreamError as exc:
         raise ToolError(str(exc)) from exc
-    summaries = [stx_transaction_summary(item, principal) for item in page.results]
-    return RecentTransactions.build(address=principal, chain=chain, transactions=summaries)
 
 
 def _transaction_error(exc: UpstreamError, chain: Chain, txid: str) -> str:
@@ -238,6 +217,111 @@ async def explain_transaction(txid: str, chain: Chain) -> TransactionExplanation
     except UpstreamError as exc:
         raise ToolError(_transaction_error(exc, chain, clean)) from exc
     return decode_stacks_transaction(stx_tx, events)
+
+
+@mcp.resource(
+    ADDRESS_SUMMARY_URI,
+    name="stacks_address_summary",
+    title="Stacks address summary",
+    mime_type="application/json",
+)
+async def address_summary(address: str) -> AddressSummary:
+    """A whole Stacks principal in one read: STX, tokens and recent transactions.
+
+    Read this instead of calling `get_stx_balance`, `get_token_balances` and
+    `get_recent_transactions` one after another. `{address}` is a mainnet
+    principal (SP..., SM... or SP....contract-name).
+
+    Returns the STX balance and lock state, every SIP-10 position including
+    sBTC, the 10 most recent confirmed transactions, and a one-sentence summary
+    covering all three. The three reads run concurrently and independently: if
+    one upstream call fails, that part is null, `failures` names it with the
+    reason, and the rest of the snapshot still arrives. Data comes from the Hiro
+    API and is read-only: reading this never holds keys, signs or broadcasts
+    anything.
+    """
+    try:
+        principal = validate_stx_principal(address)
+    except InvalidAddressError as exc:
+        raise ResourceError(str(exc)) from exc
+    return await fetch_address_summary(principal)
+
+
+_STX_GATHER = f"""\
+1. Read the resource stacks://address/{{address}}/summary. One call gives the
+   STX balance and lock state, every SIP-10 position including sBTC, and the
+   {SUMMARY_TRANSACTION_LIMIT} most recent transactions.
+2. Call get_recent_transactions(address="{{address}}", chain="stx", limit=50)
+   for enough history to judge what is normal for this account.
+3. Call explain_transaction(txid=..., chain="stx") on each transaction you want
+   to describe or question."""
+
+_BTC_GATHER = """\
+1. Call get_btc_balance(address="{address}") for the confirmed balance, the
+   unconfirmed change and the lifetime transaction count.
+2. Call get_recent_transactions(address="{address}", chain="btc", limit=50) for
+   enough history to judge what is normal for this address.
+3. Call explain_transaction(txid=..., chain="btc") on each transaction you want
+   to describe or question."""
+
+_STX_FLAGS = """\
+- Contracts this address is interacting with for the first time. Compare the
+  contract ids in the newest transactions against the older ones, and say which
+  contract and which txid.
+- Dust-sized incoming Bitcoin: tiny unsolicited sBTC credits. Give the amount
+  and the sender.
+- Outflows that are large against this account's own history, not against any
+  fixed threshold. Compare each outgoing amount to the balance and to the usual
+  size of this address's own transfers.
+- Failed transactions. A failed transaction paid a fee and did nothing, so say
+  what it was trying to do."""
+
+_BTC_FLAGS = """\
+- Counterparties this address is transacting with for the first time. Compare
+  the addresses in the newest transactions against the older ones, and say
+  which address and which txid.
+- Dust-sized incoming Bitcoin: tiny unsolicited outputs paid to this address.
+  Give the amount and the funding input.
+- Outflows that are large against this address's own history, not against any
+  fixed threshold. Compare each outgoing amount to the balance and to the usual
+  size of this address's own spends.
+- Transactions still unconfirmed, and how long they have been waiting."""
+
+
+@mcp.prompt(name="wallet_review", title="Review a wallet for unusual activity")
+def wallet_review(address: str, chain: Chain = "stx") -> list[Message]:
+    """Review one address's recent activity and flag anything unusual.
+
+    Use this when the user wants a wallet looked over rather than one figure
+    read off it. `address` is a Stacks principal or a Bitcoin address; `chain`
+    is "stx" (the default) or "btc".
+
+    The prompt names the data to gather and the four things worth flagging:
+    first-time counterparties or contracts, dust-sized incoming Bitcoin,
+    outflows that are large for this account's own history, and transactions
+    that failed or are still waiting. It carries no findings of its own: the
+    model that receives it calls the tools and does the judging.
+    """
+    label = "Stacks" if chain == "stx" else "Bitcoin"
+    try:
+        clean = validate_stx_principal(address) if chain == "stx" else validate_btc_address(address)
+    except InvalidAddressError as exc:
+        # A prompt has no ToolError equivalent, and any plain exception is
+        # rewritten to "Error rendering prompt". MCPError keeps the sentence.
+        raise MCPError(INVALID_PARAMS, str(exc)) from exc
+    gather = (_STX_GATHER if chain == "stx" else _BTC_GATHER).format(address=clean)
+    flags = _STX_FLAGS if chain == "stx" else _BTC_FLAGS
+    return [
+        UserMessage(
+            f"Review the recent activity of the {label} address {clean} and say whether "
+            f"anything about it looks unusual.\n\n"
+            f"Gather the data first:\n\n{gather}\n\n"
+            f"Then look for these four things:\n\n{flags}\n\n"
+            f"Report what you found and what you checked and found nothing wrong with. "
+            f"Cite the txid behind every claim, and do not state a conclusion the data "
+            f"does not support. If nothing is unusual, say so plainly."
+        )
+    ]
 
 
 def main() -> None:

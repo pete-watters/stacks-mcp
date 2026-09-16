@@ -220,6 +220,15 @@ class TransactionExplanation(BaseModel):
     )
 
 
+class SummaryFailure(BaseModel):
+    """One part of an address snapshot that could not be read, and why."""
+
+    part: str = Field(
+        description="Which read failed: `STX balance`, `token balances` or `recent transactions`."
+    )
+    reason: str = Field(description="What the upstream said.")
+
+
 class RecentTransactions(BaseModel):
     """A page of recent transactions for one address."""
 
@@ -250,3 +259,55 @@ class RecentTransactions(BaseModel):
             f"{pending_note}, most recent {latest}"
         )
         return cls(address=address, chain=chain, transactions=transactions, summary=summary)
+
+
+def _continuation(summary: str, short: str) -> str:
+    """Drop the leading short address, so three summaries read as one sentence."""
+    prefix = f"{short} "
+    return summary[len(prefix) :] if summary.startswith(prefix) else summary
+
+
+class AddressSummary(BaseModel):
+    """One snapshot of a Stacks principal: STX, tokens and recent transactions.
+
+    Every part is optional. A part that could not be read is ``None`` and named
+    in ``failures``, so one upstream failure costs that part and nothing else.
+    """
+
+    address: str = Field(description="The Stacks principal that was queried.")
+    stx: StxBalance | None = Field(description="STX balance and lock state, null if unavailable.")
+    tokens: TokenBalances | None = Field(
+        description="SIP-10 positions including sBTC, null if unavailable."
+    )
+    transactions: RecentTransactions | None = Field(
+        description="Most recent transactions, newest first, null if unavailable."
+    )
+    failures: list[SummaryFailure] = Field(description="Parts that could not be read, and why.")
+    summary: str = Field(description="One-sentence human-readable summary.")
+
+    @classmethod
+    def build(
+        cls,
+        address: str,
+        stx: StxBalance | None,
+        tokens: TokenBalances | None,
+        transactions: RecentTransactions | None,
+        failures: list[SummaryFailure],
+    ) -> AddressSummary:
+        short = short_address(address)
+        available = [part for part in (stx, tokens, transactions) if part is not None]
+        missing = ", ".join(failure.part for failure in failures)
+        if not available:
+            summary = f"{short}: nothing could be read, {missing} all failed"
+        else:
+            body = "; ".join(_continuation(part.summary, short) for part in available)
+            note = "" if not failures else f"; could not read {missing}"
+            summary = f"{short} {body}{note}"
+        return cls(
+            address=address,
+            stx=stx,
+            tokens=tokens,
+            transactions=transactions,
+            failures=failures,
+            summary=summary,
+        )
