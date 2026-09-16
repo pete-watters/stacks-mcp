@@ -89,3 +89,50 @@ def test_base_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert base_url() == "http://localhost:8999/api"
     monkeypatch.delenv("MEMPOOL_BASE_URL")
     assert base_url() == DEFAULT_BASE_URL
+
+
+async def test_get_address_txs_parses_fixture(
+    mocked_http: respx.MockRouter, genesis_txs_fixture: list[dict[str, Any]]
+) -> None:
+    mocked_http.get(f"{DEFAULT_BASE_URL}/address/{GENESIS}/txs").respond(
+        200, json=genesis_txs_fixture
+    )
+    client = MempoolClient()
+    try:
+        txs = await client.get_address_txs(GENESIS)
+    finally:
+        await client.aclose()
+
+    assert len(txs) == 50
+    assert sum(1 for tx in txs if not tx.status.confirmed) == 2
+    first = txs[0]
+    assert first.txid == "c99e446ab2d43e999de5708e62a8384f187f8015cc6d188af2a23e8d313b39a4"
+    assert first.value_received_by(GENESIS) == 3672
+    assert first.value_sent_by(GENESIS) == 0
+    assert first.counterparty_for(GENESIS) == "14skjJCMJ7R2YgeyENTnAFnxPcQdswkAtH"
+    assert not first.is_coinbase
+
+
+async def test_get_address_txs_non_2xx_raises_upstream_error(
+    mocked_http: respx.MockRouter,
+) -> None:
+    mocked_http.get(f"{DEFAULT_BASE_URL}/address/{GENESIS}/txs").respond(502, text="bad gateway")
+    client = MempoolClient()
+    try:
+        with pytest.raises(UpstreamError) as excinfo:
+            await client.get_address_txs(GENESIS)
+    finally:
+        await client.aclose()
+    assert excinfo.value.status_code == 502
+
+
+async def test_get_address_txs_unexpected_body_raises_upstream_error(
+    mocked_http: respx.MockRouter,
+) -> None:
+    mocked_http.get(f"{DEFAULT_BASE_URL}/address/{GENESIS}/txs").respond(200, json={"foo": 1})
+    client = MempoolClient()
+    try:
+        with pytest.raises(UpstreamError):
+            await client.get_address_txs(GENESIS)
+    finally:
+        await client.aclose()
