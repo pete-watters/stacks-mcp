@@ -19,12 +19,16 @@ from stacks_mcp.clients.mempool import get_client as get_mempool_client
 from stacks_mcp.models import (
     AddressSummary,
     BtcBalance,
+    FeeOption,
+    FeePriority,
     RecentTransactions,
     StxBalance,
+    StxTransferDraft,
     SummaryFailure,
     TokenBalance,
     TokenBalances,
     TransactionSummary,
+    ustx_to_stx,
 )
 from stacks_mcp.tokens import build_token_balance, has_unknown_decimals, resolve_metadata
 from stacks_mcp.transactions import btc_transaction_summary, stx_transaction_summary
@@ -94,6 +98,41 @@ async def fetch_stx_transactions(principal: str, limit: int) -> RecentTransactio
         stx_transaction_summary(item, principal) for item in page.results
     ]
     return RecentTransactions.build(address=principal, chain="stx", transactions=summaries)
+
+
+async def fetch_stx_transfer_draft(
+    sender: str, recipient: str, amount_ustx: int, memo: str | None
+) -> StxTransferDraft:
+    """Assemble an unsigned STX transfer: the sender's nonce and balance, plus fees.
+
+    Nothing is signed here and no key is read. The nonce and balance come from
+    the sender's account and the fee tiers from the mempool, so a wallet has
+    every input it needs to build the transaction itself.
+    """
+    client = get_hiro_client()
+    balance, nonces, fees = await asyncio.gather(
+        client.get_stx_balance(sender), client.get_nonces(sender), client.get_mempool_fees()
+    )
+    tiers = fees.token_transfer
+    by_priority: list[tuple[FeePriority, int]] = [
+        ("no_priority", tiers.no_priority),
+        ("low_priority", tiers.low_priority),
+        ("medium_priority", tiers.medium_priority),
+        ("high_priority", tiers.high_priority),
+    ]
+    options = [
+        FeeOption(priority=priority, fee_ustx=fee_ustx, fee_stx=ustx_to_stx(fee_ustx))
+        for priority, fee_ustx in by_priority
+    ]
+    return StxTransferDraft.build(
+        sender=sender,
+        recipient=recipient,
+        amount_ustx=amount_ustx,
+        memo=memo,
+        nonce=nonces.next_nonce,
+        fees=options,
+        balance_ustx=balance.balance_ustx,
+    )
 
 
 def _kept[ModelT: BaseModel](

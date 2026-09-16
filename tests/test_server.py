@@ -73,7 +73,7 @@ def _mock_token_metadata(mocked_http: respx.MockRouter, fixtures: dict[str, Any]
         mocked_http.get(f"{HIRO_BASE_URL}/metadata/v1/ft/{contract_id}").respond(status, json=body)
 
 
-async def test_all_five_tools_are_registered() -> None:
+async def test_all_six_tools_are_registered() -> None:
     async with Client(mcp) as client:
         result = await client.list_tools()
     names = {tool.name for tool in result.tools}
@@ -83,6 +83,7 @@ async def test_all_five_tools_are_registered() -> None:
         "get_token_balances",
         "get_recent_transactions",
         "explain_transaction",
+        "draft_stx_transfer",
     }
     transactions = next(t for t in result.tools if t.name == "get_recent_transactions")
     assert transactions.input_schema["required"] == ["address", "chain"]

@@ -261,6 +261,85 @@ class RecentTransactions(BaseModel):
         return cls(address=address, chain=chain, transactions=transactions, summary=summary)
 
 
+FeePriority = Literal["no_priority", "low_priority", "medium_priority", "high_priority"]
+
+
+class FeeOption(BaseModel):
+    """One fee tier for a Stacks transfer, as an absolute amount."""
+
+    priority: FeePriority = Field(description="Which tier, from `no_priority` to `high_priority`.")
+    fee_ustx: int = Field(description="Absolute fee in micro-STX, not a rate per byte.")
+    fee_stx: str = Field(description="The same fee in STX, 6 decimal places.")
+
+
+class StxTransferDraft(BaseModel):
+    """An unsigned STX transfer for a wallet to review, sign and broadcast itself.
+
+    Nothing here is signed and no key was involved in producing it. The fields
+    are the inputs a wallet needs to build the transaction: it supplies the
+    public key, signs, and broadcasts. This server does none of those.
+    """
+
+    signed: bool = Field(
+        description="Always false. This server holds no key, never signs and never broadcasts."
+    )
+    sender: str = Field(description="Standard principal that would send, SP... or SM...")
+    recipient: str = Field(description="Principal that would receive; may be a contract.")
+    amount_ustx: int = Field(description="Amount to send, in micro-STX.")
+    amount_stx: str = Field(description="The same amount in STX, 6 decimal places.")
+    memo: str | None = Field(description="Transfer memo, at most 34 bytes, or null.")
+    nonce: int = Field(description="Sender's next usable nonce, read from the Hiro API.")
+    network: str = Field(description="Always `mainnet`. This server reads mainnet only.")
+    fees: list[FeeOption] = Field(
+        description="Current fee tiers for a token transfer, cheapest first."
+    )
+    sender_balance_ustx: int = Field(description="Sender's total balance in micro-STX.")
+    sender_balance_stx: str = Field(description="Sender's total balance in STX, 6 decimal places.")
+    summary: str = Field(description="One-sentence human-readable summary.")
+
+    @classmethod
+    def build(
+        cls,
+        sender: str,
+        recipient: str,
+        amount_ustx: int,
+        memo: str | None,
+        nonce: int,
+        fees: list[FeeOption],
+        balance_ustx: int,
+    ) -> StxTransferDraft:
+        amount_stx = ustx_to_stx(amount_ustx)
+        balance_stx = ustx_to_stx(balance_ustx)
+        cheapest = min(fee.fee_ustx for fee in fees)
+        affordable = balance_ustx >= amount_ustx + cheapest
+        # The balance includes any stacked STX, so this says the balance covers
+        # it, not that the transfer will land: a locked balance cannot be spent.
+        cover = (
+            f"balance of {balance_stx} STX covers it"
+            if affordable
+            else f"balance of {balance_stx} STX does not cover it"
+        )
+        summary = (
+            f"Unsigned draft: {short_address(sender)} would send {amount_stx} STX to "
+            f"{short_address(recipient)} at nonce {nonce}, fee {ustx_to_stx(cheapest)} STX "
+            f"and up; the {cover}. Not signed and not broadcast"
+        )
+        return cls(
+            signed=False,
+            sender=sender,
+            recipient=recipient,
+            amount_ustx=amount_ustx,
+            amount_stx=amount_stx,
+            memo=memo,
+            nonce=nonce,
+            network="mainnet",
+            fees=fees,
+            sender_balance_ustx=balance_ustx,
+            sender_balance_stx=balance_stx,
+            summary=summary,
+        )
+
+
 def _continuation(summary: str, short: str) -> str:
     """Drop the leading short address, so three summaries read as one sentence."""
     prefix = f"{short} "

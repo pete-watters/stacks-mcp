@@ -61,7 +61,7 @@ async def test_the_prompt_asks_for_no_analysis_of_its_own() -> None:
     """The caller is the model, so the prompt states no findings and no thresholds."""
     text = await _render({"address": SBTC_DEPLOYER})
     assert "not against any\n  fixed threshold" in text
-    assert "do not state a conclusion the data does not support" in text
+    assert "do not state a conclusion\nthe data does not support" in text
     assert "If nothing is unusual, say so plainly." in text
 
 

@@ -13,13 +13,19 @@ from stacks_mcp.clients.hiro import get_client as get_hiro_client
 from stacks_mcp.clients.mempool import get_client
 from stacks_mcp.decoders.btc import decode_btc_transaction
 from stacks_mcp.decoders.stacks import decode_stacks_transaction
-from stacks_mcp.errors import InvalidAddressError, InvalidTxidError, UpstreamError
+from stacks_mcp.errors import (
+    InvalidAddressError,
+    InvalidMemoError,
+    InvalidTxidError,
+    UpstreamError,
+)
 from stacks_mcp.models import (
     AddressSummary,
     BtcBalance,
     Chain,
     RecentTransactions,
     StxBalance,
+    StxTransferDraft,
     TokenBalances,
     TransactionExplanation,
 )
@@ -30,9 +36,16 @@ from stacks_mcp.queries import (
     fetch_btc_transactions,
     fetch_stx_balance,
     fetch_stx_transactions,
+    fetch_stx_transfer_draft,
     fetch_token_balances,
 )
-from stacks_mcp.validation import validate_btc_address, validate_stx_principal, validate_txid
+from stacks_mcp.validation import (
+    validate_btc_address,
+    validate_memo,
+    validate_stx_principal,
+    validate_stx_sender,
+    validate_txid,
+)
 
 MAX_TRANSACTION_LIMIT = 50
 NOT_FOUND = 404
@@ -219,6 +232,54 @@ async def explain_transaction(txid: str, chain: Chain) -> TransactionExplanation
     return decode_stacks_transaction(stx_tx, events)
 
 
+@mcp.tool()
+async def draft_stx_transfer(
+    sender: str, recipient: str, amount_ustx: int, memo: str | None = None
+) -> StxTransferDraft:
+    """Draft an unsigned STX transfer for a wallet to review, sign and send itself.
+
+    This tool neither signs nor broadcasts anything.
+    The caller holds no key, and this server holds none either.
+    It reads public data and returns the inputs a wallet needs to build the
+    transaction: the sender's next nonce, current fee tiers, and the amount and
+    recipient as given. Signing and broadcasting happen in the user's wallet,
+    never here. Nothing this tool returns can move funds.
+
+    Call this when the user asks what a transfer would cost, what nonce it would
+    use, or wants a transfer prepared for their wallet. `sender` must be a
+    standard principal (SP... or SM...): a contract has no key and cannot sign.
+    `recipient` may be a standard or a contract principal. `amount_ustx` is in
+    micro-STX and must be at least 1; 1 STX is 1,000,000 micro-STX. `memo` is
+    optional and holds at most 34 bytes once encoded.
+
+    Returns `signed`, which is always false, the sender, recipient and amount in
+    both units, the memo, the nonce, the network, four fee tiers as absolute
+    micro-STX amounts, the sender's balance and a one-sentence summary. Fees
+    come from Hiro's mempool fee endpoint for token transfers. The balance
+    includes any STX locked by stacking, which cannot be spent, so a balance
+    that covers the amount is not a promise that the transfer will land.
+    """
+    try:
+        clean_sender = validate_stx_sender(sender)
+        clean_recipient = validate_stx_principal(recipient)
+    except InvalidAddressError as exc:
+        raise ToolError(str(exc)) from exc
+    if amount_ustx < 1:
+        raise ToolError(f"amount_ustx must be at least 1 micro-STX, got {amount_ustx}")
+    clean_memo: str | None = None
+    if memo is not None:
+        try:
+            clean_memo = validate_memo(memo)
+        except InvalidMemoError as exc:
+            raise ToolError(str(exc)) from exc
+    try:
+        return await fetch_stx_transfer_draft(
+            clean_sender, clean_recipient, amount_ustx, clean_memo
+        )
+    except UpstreamError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 @mcp.resource(
     ADDRESS_SUMMARY_URI,
     name="stacks_address_summary",
@@ -248,21 +309,22 @@ async def address_summary(address: str) -> AddressSummary:
 
 
 _STX_GATHER = f"""\
-1. Read the resource stacks://address/{{address}}/summary. One call gives the
-   STX balance and lock state, every SIP-10 position including sBTC, and the
-   {SUMMARY_TRANSACTION_LIMIT} most recent transactions.
+1. Read the resource stacks://address/{{address}}/summary
+   One call gives the STX balance and lock state, every SIP-10 position
+   including sBTC, and the {SUMMARY_TRANSACTION_LIMIT} most recent transactions.
 2. Call get_recent_transactions(address="{{address}}", chain="stx", limit=50)
    for enough history to judge what is normal for this account.
-3. Call explain_transaction(txid=..., chain="stx") on each transaction you want
-   to describe or question."""
+3. Call explain_transaction(txid=..., chain="stx")
+   on each transaction you want to describe or question."""
 
 _BTC_GATHER = """\
-1. Call get_btc_balance(address="{address}") for the confirmed balance, the
-   unconfirmed change and the lifetime transaction count.
-2. Call get_recent_transactions(address="{address}", chain="btc", limit=50) for
-   enough history to judge what is normal for this address.
-3. Call explain_transaction(txid=..., chain="btc") on each transaction you want
-   to describe or question."""
+1. Call get_btc_balance(address="{address}")
+   for the confirmed balance, the unconfirmed change and the lifetime
+   transaction count.
+2. Call get_recent_transactions(address="{address}", chain="btc", limit=50)
+   for enough history to judge what is normal for this address.
+3. Call explain_transaction(txid=..., chain="btc")
+   on each transaction you want to describe or question."""
 
 _STX_FLAGS = """\
 - Contracts this address is interacting with for the first time. Compare the
@@ -313,13 +375,13 @@ def wallet_review(address: str, chain: Chain = "stx") -> list[Message]:
     flags = _STX_FLAGS if chain == "stx" else _BTC_FLAGS
     return [
         UserMessage(
-            f"Review the recent activity of the {label} address {clean} and say whether "
-            f"anything about it looks unusual.\n\n"
+            f"Review the recent activity of the {label} address\n{clean}\n"
+            f"and say whether anything about it looks unusual.\n\n"
             f"Gather the data first:\n\n{gather}\n\n"
             f"Then look for these four things:\n\n{flags}\n\n"
-            f"Report what you found and what you checked and found nothing wrong with. "
-            f"Cite the txid behind every claim, and do not state a conclusion the data "
-            f"does not support. If nothing is unusual, say so plainly."
+            f"Report what you found and what you checked and found nothing wrong\n"
+            f"with. Cite the txid behind every claim, and do not state a conclusion\n"
+            f"the data does not support. If nothing is unusual, say so plainly."
         )
     ]
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from stacks_mcp.errors import InvalidAddressError, InvalidTxidError
+from stacks_mcp.errors import InvalidAddressError, InvalidMemoError, InvalidTxidError
 from stacks_mcp.models import Chain
 
 # Base58Check: P2PKH starts with 1, P2SH with 3. 26 to 35 chars, no 0 O I l.
@@ -23,6 +23,8 @@ _STX_CONTRACT_NAME_RE = re.compile(r"^[a-zA-Z]([a-zA-Z0-9]|[-_]){0,39}$")
 # it with a `0x` prefix and Bitcoin without, so the prefix is optional here and
 # put back, or stripped, by `validate_txid`.
 _TXID_RE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
+# A Stacks token-transfer memo is a fixed 34-byte field in the transaction.
+MEMO_MAX_BYTES = 34
 
 
 def validate_btc_address(address: str) -> str:
@@ -60,6 +62,36 @@ def validate_stx_principal(principal: str) -> str:
         f"'{candidate}' is not a mainnet Stacks principal; expected one starting with SP or SM, "
         "optionally followed by .contract-name"
     )
+
+
+def validate_stx_sender(principal: str) -> str:
+    """Return a standard principal that could sign a transaction, or raise.
+
+    A contract principal holds STX but has no private key behind it, so it can
+    never be the sender of a transfer. Rejecting it here keeps a draft from
+    naming a sender that can never sign it.
+    """
+    candidate = validate_stx_principal(principal)
+    if "." in candidate:
+        raise InvalidAddressError(
+            f"'{candidate}' is a contract principal, which cannot send a transfer; "
+            "expected a standard principal starting with SP or SM"
+        )
+    return candidate
+
+
+def validate_memo(memo: str) -> str:
+    """Return the memo unchanged, or raise if it will not fit the transfer field.
+
+    A Stacks token-transfer memo is a fixed 34-byte field, so the limit is on
+    encoded bytes rather than characters: one emoji spends four of the 34.
+    """
+    encoded = len(memo.encode())
+    if encoded > MEMO_MAX_BYTES:
+        raise InvalidMemoError(
+            f"memo is {encoded} bytes; a Stacks transfer memo holds at most {MEMO_MAX_BYTES}"
+        )
+    return memo
 
 
 def validate_txid(txid: str, chain: Chain) -> str:

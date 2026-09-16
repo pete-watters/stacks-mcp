@@ -7,13 +7,14 @@ import respx
 from stacks_mcp.clients.hiro import DEFAULT_BASE_URL, HiroClient, api_key, base_url
 from stacks_mcp.errors import UpstreamError
 
-from .conftest import SBTC_DEPLOYER
+from .conftest import SBTC_DEPLOYER, load_fixture
 
 STX_BALANCE_URL = f"{DEFAULT_BASE_URL}/extended/v3/principals/{SBTC_DEPLOYER}/balances/stx"
 NONCES_URL = f"{DEFAULT_BASE_URL}/extended/v3/principals/{SBTC_DEPLOYER}/nonces"
 FT_BALANCES_URL = f"{DEFAULT_BASE_URL}/extended/v3/principals/{SBTC_DEPLOYER}/balances/ft"
 TRANSACTIONS_URL = f"{DEFAULT_BASE_URL}/extended/v3/principals/{SBTC_DEPLOYER}/transactions"
 SBTC_METADATA_URL = f"{DEFAULT_BASE_URL}/metadata/v1/ft/{SBTC_DEPLOYER}.sbtc-token"
+MEMPOOL_FEES_URL = f"{DEFAULT_BASE_URL}/extended/v2/mempool/fees"
 
 
 async def test_get_stx_balance_parses_fixture(
@@ -186,6 +187,24 @@ async def test_api_key_is_sent_only_when_set(
         assert route.calls.last.request.headers["x-api-key"] == "secret-key"
     finally:
         await client.aclose()
+
+
+async def test_get_mempool_fees_reads_the_token_transfer_tiers(
+    mocked_http: respx.MockRouter,
+) -> None:
+    """The tiers are absolute micro-STX fees, not a rate per byte."""
+    mocked_http.get(MEMPOOL_FEES_URL).respond(
+        200, json=load_fixture("hiro", "v2_mempool_fees.json")
+    )
+    client = HiroClient()
+    try:
+        fees = await client.get_mempool_fees()
+    finally:
+        await client.aclose()
+    assert fees.token_transfer.no_priority == 1289
+    assert fees.token_transfer.low_priority == 2398
+    assert fees.token_transfer.medium_priority == 3508
+    assert fees.token_transfer.high_priority == 4395
 
 
 def test_base_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

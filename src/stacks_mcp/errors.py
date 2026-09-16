@@ -18,3 +18,11 @@ class InvalidAddressError(ValueError):
 
 class InvalidTxidError(ValueError):
     """The caller supplied a transaction id that does not look like one."""
+
+
+class InvalidMemoError(ValueError):
+    """The caller supplied a memo too long for a Stacks transfer."""
+
+
+class InvalidAmountError(ValueError):
+    """The caller supplied an amount that cannot be transferred."""
