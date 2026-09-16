@@ -280,6 +280,27 @@ class HiroTransactionEvents(BaseModel):
     results: list[HiroTransactionEvent]
 
 
+class HiroFeePriorities(BaseModel):
+    """Absolute fees in micro-STX, one per priority tier, not a rate per byte."""
+
+    no_priority: int
+    low_priority: int
+    medium_priority: int
+    high_priority: int
+
+
+class HiroMempoolFees(BaseModel):
+    """Response of ``GET /extended/v2/mempool/fees``, broken out by transaction type.
+
+    Hiro derives these from what is actually sitting in the mempool, so
+    ``token_transfer`` is the tier table for the transaction a draft transfer
+    would become. ``all`` and ``contract_call`` are skewed by outliers and are
+    not used here.
+    """
+
+    token_transfer: HiroFeePriorities
+
+
 def base_url() -> str:
     """Base URL for the API, overridable with ``HIRO_BASE_URL``."""
     return os.environ.get("HIRO_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
@@ -374,6 +395,15 @@ class HiroClient:
             HiroTransactionEvents,
             params={"limit": min(limit, MAX_EVENT_LIMIT)},
         )
+
+    async def get_mempool_fees(self) -> HiroMempoolFees:
+        """Fetch current fee tiers, in absolute micro-STX, per transaction type.
+
+        This is the only version of the endpoint: ``/extended/v1`` and
+        ``/extended/v3`` both answer 404, and ``/extended/v2/mempool/fees``
+        carries no deprecation warning, unlike the v2 address endpoints.
+        """
+        return await self._get_json("/extended/v2/mempool/fees", HiroMempoolFees)
 
     async def get_ft_metadata(self, contract_id: str) -> HiroFtMetadata | None:
         """Fetch SIP-010 metadata for a token contract.
