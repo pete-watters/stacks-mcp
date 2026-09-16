@@ -22,6 +22,26 @@ TxKind = Literal[
     "coinbase",
     "other",
 ]
+# What `explain_transaction` decoded a transaction into. `coinbase` is the one
+# case both chains share; every other member belongs to exactly one chain.
+ExplainKind = Literal[
+    "stx_transfer",
+    "sip10_transfer",
+    "sbtc_deposit",
+    "sbtc_withdrawal",
+    "stacking",
+    "contract_call",
+    "contract_deploy",
+    "tenure_change",
+    "btc_transfer",
+    "consolidation",
+    "batch_payment",
+    "self_send",
+    "coinbase",
+    "unknown",
+]
+# Scalars only, so `detail` stays flat and survives a JSON-schema round trip.
+DetailValue = bool | int | str | list[str] | None
 
 
 def sats_to_btc(sats: int) -> str:
@@ -167,6 +187,37 @@ class TransactionSummary(BaseModel):
     counterparty: str | None = Field(description="Other address or contract id, if there is one.")
     status: TxStatus = Field(description="`confirmed`, `pending` or `failed`.")
     kind: TxKind = Field(description="What the transaction did.")
+
+
+class Participant(BaseModel):
+    """One address or contract involved in a transaction, and how."""
+
+    address: str = Field(description="Address or contract id.")
+    role: str = Field(
+        description="What it did: `sender`, `recipient`, `contract`, `stacker`, `delegate`, "
+        "`caller`, `deployer`, `sponsor`, `miner`, `input` or `output`."
+    )
+
+
+class TransactionExplanation(BaseModel):
+    """One transaction decoded into plain English plus the specifics behind it."""
+
+    txid: str = Field(description="Normalised transaction id, `0x`-prefixed on Stacks.")
+    chain: Chain = Field(description="`btc` or `stx`.")
+    kind: ExplainKind = Field(description="Which decode case matched, `unknown` for the fallback.")
+    summary: str = Field(description="One plain-English sentence describing the transaction.")
+    detail: dict[str, DetailValue] = Field(description="The decoded specifics behind the summary.")
+    fee: str = Field(
+        description="Fee as a human string: sat/vB on Bitcoin, STX and uSTX on Stacks."
+    )
+    status: TxStatus = Field(description="`confirmed`, `pending` or `failed`.")
+    block_height: int | None = Field(description="Block height, or null while unconfirmed.")
+    timestamp: str | None = Field(
+        description="Block time as ISO 8601 UTC, or null while unconfirmed."
+    )
+    participants: list[Participant] = Field(
+        description="Addresses and contracts involved, each with a role."
+    )
 
 
 class RecentTransactions(BaseModel):

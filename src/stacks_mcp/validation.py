@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import re
 
-from stacks_mcp.errors import InvalidAddressError
+from stacks_mcp.errors import InvalidAddressError, InvalidTxidError
+from stacks_mcp.models import Chain
 
 # Base58Check: P2PKH starts with 1, P2SH with 3. 26 to 35 chars, no 0 O I l.
 _BASE58_RE = re.compile(r"^[13][1-9A-HJ-NP-Za-km-z]{25,34}$")
@@ -18,6 +19,10 @@ _STX_ADDRESS_RE = re.compile(r"^S[PM][0-9A-HJKMNP-TV-Z]{26,39}$")
 # Contract name as the Hiro metadata API validates it: a letter, then up to 39 of
 # letters, digits, hyphen or underscore.
 _STX_CONTRACT_NAME_RE = re.compile(r"^[a-zA-Z]([a-zA-Z0-9]|[-_]){0,39}$")
+# A transaction hash on either chain: 32 bytes as 64 hex characters. Stacks writes
+# it with a `0x` prefix and Bitcoin without, so the prefix is optional here and
+# put back, or stripped, by `validate_txid`.
+_TXID_RE = re.compile(r"^(0x)?[0-9a-fA-F]{64}$")
 
 
 def validate_btc_address(address: str) -> str:
@@ -55,3 +60,23 @@ def validate_stx_principal(principal: str) -> str:
         f"'{candidate}' is not a mainnet Stacks principal; expected one starting with SP or SM, "
         "optionally followed by .contract-name"
     )
+
+
+def validate_txid(txid: str, chain: Chain) -> str:
+    """Return the txid in the form the chain's API expects, or raise.
+
+    Both chains identify a transaction by the same 32 bytes. Hiro writes them
+    with a ``0x`` prefix and mempool.space without, so the prefix is accepted
+    either way and normalised to whichever form the upstream wants. Hex case is
+    lowered, because both APIs echo lower-case ids back.
+    """
+    candidate = txid.strip()
+    if not candidate:
+        raise InvalidTxidError("txid is empty")
+    if not _TXID_RE.match(candidate):
+        raise InvalidTxidError(
+            f"'{candidate}' is not a transaction id; expected 64 hex characters"
+            f"{', with or without a 0x prefix' if chain == 'stx' else ''}"
+        )
+    bare = candidate[2:] if candidate.startswith("0x") else candidate
+    return f"0x{bare.lower()}" if chain == "stx" else bare.lower()
