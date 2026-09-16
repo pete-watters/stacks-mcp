@@ -20,7 +20,13 @@ Straight from GitHub, no clone:
 uvx --from git+https://github.com/pete-watters/stacks-mcp stacks-mcp
 ```
 
-The server speaks MCP over stdio. Set `MEMPOOL_BASE_URL` to point at a self-hosted mempool instance (default `https://mempool.space/api`).
+The server speaks MCP over stdio and needs no configuration.
+
+| Env var | Default | Purpose |
+| --- | --- | --- |
+| `MEMPOOL_BASE_URL` | `https://mempool.space/api` | Point at a self-hosted mempool instance. |
+| `HIRO_BASE_URL` | `https://api.hiro.so` | Point at a self-hosted Stacks API. |
+| `HIRO_API_KEY` | unset | Sent as the `x-api-key` header. Optional: it raises Hiro's rate limits, which are otherwise 20 requests a second and 50 a minute per IP. Get one at [platform.hiro.so](https://platform.hiro.so). |
 
 ### Claude Desktop
 
@@ -48,6 +54,27 @@ claude mcp add stacks-mcp -- uvx --from git+https://github.com/pete-watters/stac
 | Tool | Input | Returns | Source |
 | --- | --- | --- | --- |
 | `get_btc_balance` | `address` (1..., 3... or bc1...) | confirmed and unconfirmed sats, confirmed BTC (8 dp), tx count, summary | mempool.space |
+| `get_stx_balance` | `address` (SP..., SM... or SP....contract-name) | balance in micro-STX and STX (6 dp), locked amount in both units, next nonce, summary | Hiro API |
+| `get_token_balances` | `address` (SP..., SM... or SP....contract-name) | one entry per SIP-10 token: contract id, symbol, decimals, base-unit and human balance, `is_sbtc` flag, plus a summary | Hiro API |
+| `get_recent_transactions` | `address`, `chain` (`btc` or `stx`), `limit` (1–50, default 10) | normalised transactions: txid, ISO 8601 UTC timestamp (null while unconfirmed), direction, amount in BTC or STX, counterparty, status, kind, plus a summary | mempool.space, Hiro API |
+
+### Which upstream endpoints
+
+Hiro's `/extended/v1` and `/extended/v2` address endpoints still answer but every
+response carries a `warning: 299 - "Deprecated"` header, so this server uses the
+current `/extended/v3/principals/...` endpoints for balances, nonces and
+transactions, and the Token Metadata API at `/metadata/v1/ft/{contract}` for
+symbols and decimals. Token metadata is cached per process. A token the indexer
+has no metadata for keeps its base-unit balance: the symbol falls back to the
+contract name, decimals to 0, and the summary says how many are affected, so no
+amount is silently misscaled.
+
+Direction always describes value flow as seen by the queried address: `in`,
+`out`, `self` when it is on both sides, and `other` when no value moved. A
+Stacks contract call that only pays a fee reports `out` with an amount of `0`,
+because the fee is not a transfer. Stacks results are confirmed transactions
+only; Bitcoin results include mempool transactions, which have a `pending`
+status and no timestamp.
 
 ## Example: `explain_transaction`
 
@@ -57,11 +84,8 @@ _Coming with tool 5._
 
 ## Roadmap
 
-1. `get_stx_balance(address)`: STX balance, locked amount, nonce (Hiro API).
-2. `get_token_balances(address)`: SIP-10 fungible tokens including sBTC, with symbol, decimals and human-readable amount.
-3. `get_recent_transactions(address, chain, limit=10)`: normalised list across BTC and STX.
-4. `explain_transaction(txid, chain)`: deterministic plain-English decode of a transaction. No LLM inside the tool; the agent calling it is the LLM.
-5. `draft_stx_transfer(sender, recipient, amount_ustx, memo?)`: unsigned transfer payload plus fee estimate.
+1. `explain_transaction(txid, chain)`: deterministic plain-English decode of a transaction. No LLM inside the tool; the agent calling it is the LLM.
+2. `draft_stx_transfer(sender, recipient, amount_ustx, memo?)`: unsigned transfer payload plus fee estimate.
 
 ## Development
 
