@@ -1,6 +1,6 @@
 # stacks-mcp
 
-Read-only Bitcoin/Stacks MCP server in Python. The full brief is `docs/BRIEF.md`; read it first.
+Read-only Bitcoin/Stacks MCP server in Python. `DESIGN.md` covers how `explain_transaction` decodes.
 
 ## Rules
 
