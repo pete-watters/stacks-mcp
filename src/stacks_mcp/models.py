@@ -2,16 +2,54 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
 SATS_PER_BTC = Decimal(100_000_000)
+USTX_PER_STX = Decimal(1_000_000)
+
+Chain = Literal["btc", "stx"]
+Direction = Literal["in", "out", "self", "other"]
+TxStatus = Literal["confirmed", "pending", "failed"]
+TxKind = Literal[
+    "transfer",
+    "token_transfer",
+    "contract_call",
+    "smart_contract",
+    "coinbase",
+    "other",
+]
 
 
 def sats_to_btc(sats: int) -> str:
     """Format satoshis as a BTC string with exactly 8 decimal places."""
     return f"{Decimal(sats) / SATS_PER_BTC:.8f}"
+
+
+def ustx_to_stx(ustx: int) -> str:
+    """Format micro-STX as an STX string with exactly 6 decimal places."""
+    return f"{Decimal(ustx) / USTX_PER_STX:.6f}"
+
+
+def base_units_to_amount(raw: int, decimals: int) -> str:
+    """Format a token's base units using its declared decimals.
+
+    ``decimals`` of 0 returns the raw integer, which is also the fallback when
+    a token's metadata is unknown.
+    """
+    if decimals <= 0:
+        return str(raw)
+    return f"{Decimal(raw) / (Decimal(10) ** decimals):.{decimals}f}"
+
+
+def unix_to_iso(timestamp: int | None) -> str | None:
+    """Format a unix timestamp as ISO 8601 UTC, or ``None`` if there is none."""
+    if timestamp is None:
+        return None
+    return datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z")
 
 
 def short_address(address: str) -> str:
@@ -47,3 +85,117 @@ class BtcBalance(BaseModel):
             tx_count=tx_count,
             summary=summary,
         )
+
+
+class StxBalance(BaseModel):
+    """STX position of one Stacks principal as seen by the Hiro API."""
+
+    address: str = Field(description="The Stacks principal that was queried.")
+    balance_ustx: int = Field(description="Total balance in micro-STX, locked included.")
+    balance_stx: str = Field(description="Total balance in STX, 6 decimal places.")
+    locked_ustx: int = Field(description="Micro-STX locked by stacking, 0 if none.")
+    locked_stx: str = Field(description="Locked balance in STX, 6 decimal places.")
+    nonce: int = Field(description="Next usable nonce for this principal.")
+    summary: str = Field(description="One-sentence human-readable summary.")
+
+    @classmethod
+    def build(cls, address: str, balance_ustx: int, locked_ustx: int, nonce: int) -> StxBalance:
+        balance_stx = ustx_to_stx(balance_ustx)
+        locked_stx = ustx_to_stx(locked_ustx)
+        locked_part = "none locked" if locked_ustx == 0 else f"{locked_stx} STX locked by stacking"
+        summary = (
+            f"{short_address(address)} holds {balance_stx} STX, {locked_part}, next nonce {nonce}"
+        )
+        return cls(
+            address=address,
+            balance_ustx=balance_ustx,
+            balance_stx=balance_stx,
+            locked_ustx=locked_ustx,
+            locked_stx=locked_stx,
+            nonce=nonce,
+            summary=summary,
+        )
+
+
+class TokenBalance(BaseModel):
+    """One SIP-010 fungible-token position."""
+
+    contract_id: str = Field(description="Token contract, formatted `SP....token-name`.")
+    symbol: str = Field(
+        description="Token symbol from its metadata, or the contract name when unknown."
+    )
+    decimals: int = Field(description="Decimals from metadata; 0 when metadata is unknown.")
+    balance_raw: str = Field(description="Balance in base units, as an integer string.")
+    balance: str = Field(description="Balance scaled by `decimals`, human-readable.")
+    is_sbtc: bool = Field(description="True for the mainnet sBTC token contract.")
+
+
+class TokenBalances(BaseModel):
+    """Every fungible token a Stacks principal holds."""
+
+    address: str = Field(description="The Stacks principal that was queried.")
+    tokens: list[TokenBalance] = Field(description="Positions, largest base-unit balance first.")
+    summary: str = Field(description="One-sentence human-readable summary.")
+
+    @classmethod
+    def build(cls, address: str, tokens: list[TokenBalance], unknown: int) -> TokenBalances:
+        short = short_address(address)
+        if not tokens:
+            summary = f"{short} holds no fungible tokens"
+            return cls(address=address, tokens=tokens, summary=summary)
+        listed = ", ".join(f"{token.balance} {token.symbol}" for token in tokens[:3])
+        more = "" if len(tokens) <= 3 else f" and {len(tokens) - 3} more"
+        note = (
+            "" if unknown == 0 else f"; metadata unknown for {unknown} of them, shown in base units"
+        )
+        summary = f"{short} holds {len(tokens)} fungible tokens: {listed}{more}{note}"
+        return cls(address=address, tokens=tokens, summary=summary)
+
+
+class TransactionSummary(BaseModel):
+    """One transaction, normalised across Bitcoin and Stacks."""
+
+    txid: str = Field(description="Transaction id.")
+    chain: Chain = Field(description="`btc` or `stx`.")
+    timestamp: str | None = Field(
+        description="Block time as ISO 8601 UTC, or null while unconfirmed."
+    )
+    direction: Direction = Field(
+        description="`in`, `out`, `self` (both sides) or `other` (no value moved)."
+    )
+    amount: str = Field(description="Value moved, in BTC or STX. `0` when nothing moved.")
+    counterparty: str | None = Field(description="Other address or contract id, if there is one.")
+    status: TxStatus = Field(description="`confirmed`, `pending` or `failed`.")
+    kind: TxKind = Field(description="What the transaction did.")
+
+
+class RecentTransactions(BaseModel):
+    """A page of recent transactions for one address."""
+
+    address: str = Field(description="The address that was queried.")
+    chain: Chain = Field(description="Chain the transactions were read from.")
+    transactions: list[TransactionSummary] = Field(description="Newest first.")
+    summary: str = Field(description="One-sentence human-readable summary.")
+
+    @classmethod
+    def build(
+        cls, address: str, chain: Chain, transactions: list[TransactionSummary]
+    ) -> RecentTransactions:
+        short = short_address(address)
+        unit = "BTC" if chain == "btc" else "STX"
+        if not transactions:
+            summary = f"{short} has no recent {unit} transactions"
+            return cls(address=address, chain=chain, transactions=transactions, summary=summary)
+        counts = {
+            name: sum(1 for tx in transactions if tx.direction == name)
+            for name in ("in", "out", "self", "other")
+        }
+        breakdown = ", ".join(f"{count} {name}" for name, count in counts.items() if count)
+        pending = sum(1 for tx in transactions if tx.status == "pending")
+        pending_note = "" if pending == 0 else f", {pending} still unconfirmed"
+        latest = transactions[0].timestamp or "pending"
+        summary = (
+            f"{short} has {len(transactions)} recent {unit} transactions ({breakdown})"
+            f"{pending_note}, most recent {latest}"
+        )
+        return cls(address=address, chain=chain, transactions=transactions, summary=summary)
