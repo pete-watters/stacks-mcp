@@ -1,0 +1,48 @@
+[project]
+name = "stacks-mcp"
+version = "0.1.0"
+description = "Read-only Bitcoin/Stacks MCP server"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "Pete Watters" }]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+    "mcp>=1.2",
+    "pydantic>=2",
+]
+
+[project.scripts]
+stacks-mcp = "stacks_mcp.server:main"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "respx>=0.21",
+    "ruff>=0.6",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/stacks_mcp"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+files = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
