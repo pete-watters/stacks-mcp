@@ -14,3 +14,7 @@ class UpstreamError(Exception):
 
 class InvalidAddressError(ValueError):
     """The caller supplied an address that does not look like a valid address."""
+
+
+class InvalidTxidError(ValueError):
+    """The caller supplied a transaction id that does not look like one."""

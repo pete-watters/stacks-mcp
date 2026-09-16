@@ -16,7 +16,7 @@ import os
 from typing import TypeVar
 
 import httpx
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from stacks_mcp import __version__
 from stacks_mcp.errors import UpstreamError
@@ -29,6 +29,9 @@ TIMEOUT_SECONDS = 15.0
 # Metadata is missing for tokens the indexer has not processed (404) or is still
 # processing (422). Both are normal and must not fail a balance query.
 _SOFT_METADATA_STATUSES = frozenset({404, 422})
+
+# The events endpoint caps `limit` at 100 and rejects anything larger.
+MAX_EVENT_LIMIT = 100
 
 _ModelT = TypeVar("_ModelT", bound=BaseModel)
 
@@ -104,22 +107,48 @@ class HiroTxSender(BaseModel):
     nonce: int
 
 
+class HiroClarityValue(BaseModel):
+    """A Clarity value as the API renders it: raw hex plus a printable form."""
+
+    hex: str
+    repr: str
+
+
 class HiroTokenTransfer(BaseModel):
     recipient: str
     amount: str
+    memo: HiroClarityValue | None = None
 
 
 class HiroContractCall(BaseModel):
     contract_id: str
     function_name: str
+    # Only present when the request asks for ``include=function_args``.
+    function_args: list[HiroClarityValue] = Field(default_factory=list)
+
+    @property
+    def contract_name(self) -> str:
+        """The ``token-name`` half of ``SP....token-name``."""
+        _, _, name = self.contract_id.partition(".")
+        return name or self.contract_id
 
 
 class HiroSmartContract(BaseModel):
     contract_id: str
+    clarity_version: int | None = None
+
+    @property
+    def contract_name(self) -> str:
+        _, _, name = self.contract_id.partition(".")
+        return name or self.contract_id
 
 
 class HiroCoinbase(BaseModel):
     alt_recipient: str | None = None
+
+
+class HiroTenureChange(BaseModel):
+    cause: str
 
 
 class HiroTransaction(BaseModel):
@@ -161,6 +190,94 @@ class HiroPrincipalTransaction(BaseModel):
 class HiroPrincipalTransactions(BaseModel):
     total: int
     results: list[HiroPrincipalTransaction]
+
+
+class HiroTransactionDetail(BaseModel):
+    """Response of ``GET /extended/v3/transactions/{tx_id}``.
+
+    ``block`` is absent while a transaction is still in the mempool. Exactly one
+    of the payload blocks is present, chosen by ``type``; an unrecognised type
+    leaves them all ``None``, which the decoder reports as its fallback case.
+    """
+
+    tx_id: str
+    sender: HiroTxSender
+    sponsor: HiroTxSender | None = None
+    fee_rate: str
+    block: HiroBlock | None = None
+    status: str
+    type: str
+    event_count: int = 0
+    token_transfer: HiroTokenTransfer | None = None
+    contract_call: HiroContractCall | None = None
+    smart_contract: HiroSmartContract | None = None
+    coinbase: HiroCoinbase | None = None
+    tenure_change: HiroTenureChange | None = None
+
+
+class HiroFtAssetEvent(BaseModel):
+    """A fungible-token movement. ``mint`` has no sender, ``burn`` no recipient."""
+
+    type: str
+    asset_identifier: str
+    amount: str
+    sender: str | None = None
+    recipient: str | None = None
+
+    @property
+    def contract_id(self) -> str:
+        """The ``SP....token-name`` part of the asset identifier."""
+        return self.asset_identifier.split("::", 1)[0]
+
+    @property
+    def asset_name(self) -> str:
+        """The ``::asset`` part, which is not always the contract name."""
+        _, _, name = self.asset_identifier.partition("::")
+        return name or self.asset_identifier
+
+
+class HiroNftAssetEvent(BaseModel):
+    type: str
+    asset_identifier: str
+    sender: str | None = None
+    recipient: str | None = None
+
+
+class HiroStxAssetEvent(BaseModel):
+    type: str
+    amount: str
+    sender: str | None = None
+    recipient: str | None = None
+
+
+class HiroStxLockEvent(BaseModel):
+    """STX locked by stacking. ``amount`` is the resulting total, not the delta."""
+
+    amount: str
+    address: str
+    unlock_bitcoin_height: int | None = None
+
+
+class HiroContractLogEvent(BaseModel):
+    contract_id: str
+    topic: str
+
+
+class HiroTransactionEvent(BaseModel):
+    """One item of ``GET /extended/v3/transactions/{tx_id}/events``."""
+
+    event_index: int
+    type: str
+    ft_asset: HiroFtAssetEvent | None = None
+    nft_asset: HiroNftAssetEvent | None = None
+    stx_asset: HiroStxAssetEvent | None = None
+    stx_lock: HiroStxLockEvent | None = None
+    contract_log: HiroContractLogEvent | None = None
+
+
+class HiroTransactionEvents(BaseModel):
+    total: int
+    results: list[HiroTransactionEvent]
 
 
 def base_url() -> str:
@@ -232,6 +349,30 @@ class HiroClient:
             f"/extended/v3/principals/{principal}/transactions",
             HiroPrincipalTransactions,
             params={"limit": limit},
+        )
+
+    async def get_transaction(self, txid: str) -> HiroTransactionDetail:
+        """Fetch one transaction, including its contract-call arguments.
+
+        ``function_args`` is a heavy field the API omits by default, so it is
+        asked for explicitly. Without it a contract call carries only its
+        contract id and function name, which is not enough to say how much STX a
+        ``stack-stx`` locked.
+        """
+        return await self._get_json(
+            f"/extended/v3/transactions/{txid}",
+            HiroTransactionDetail,
+            params={"include": "function_args"},
+        )
+
+    async def get_transaction_events(
+        self, txid: str, limit: int = MAX_EVENT_LIMIT
+    ) -> HiroTransactionEvents:
+        """Fetch the events one transaction emitted, oldest first."""
+        return await self._get_json(
+            f"/extended/v3/transactions/{txid}/events",
+            HiroTransactionEvents,
+            params={"limit": min(limit, MAX_EVENT_LIMIT)},
         )
 
     async def get_ft_metadata(self, contract_id: str) -> HiroFtMetadata | None:
