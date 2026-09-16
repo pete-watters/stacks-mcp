@@ -64,14 +64,20 @@ class MempoolVin(BaseModel):
 
 class MempoolVout(BaseModel):
     scriptpubkey_address: str | None = None
+    scriptpubkey_type: str = ""
     value: int = 0
+
+    @property
+    def is_op_return(self) -> bool:
+        return self.scriptpubkey_type == "op_return"
 
 
 class MempoolTransaction(BaseModel):
-    """One item of ``GET /api/address/{address}/txs``."""
+    """One transaction, from ``GET /api/tx/{txid}`` or an address's ``/txs``."""
 
     txid: str
     fee: int = 0
+    weight: int = 0
     status: MempoolTxStatus
     vin: list[MempoolVin]
     vout: list[MempoolVout]
@@ -141,6 +147,14 @@ class MempoolClient:
         response = await self._get(f"/address/{address}")
         try:
             return MempoolAddress.model_validate_json(response.content)
+        except ValidationError as exc:
+            raise UpstreamError(SERVICE, response.status_code, f"unexpected body: {exc}") from exc
+
+    async def get_transaction(self, txid: str) -> MempoolTransaction:
+        """Fetch one transaction with its inputs, outputs, weight and fee."""
+        response = await self._get(f"/tx/{txid}")
+        try:
+            return MempoolTransaction.model_validate_json(response.content)
         except ValidationError as exc:
             raise UpstreamError(SERVICE, response.status_code, f"unexpected body: {exc}") from exc
 
