@@ -159,7 +159,7 @@ An sBTC deposit, where the amount comes from the mint event rather than the call
     "amount_raw": 98076,
     "amount_sbtc": "0.00098076",
     "asset_identifier": "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token::sbtc-token",
-    "recipient": "SP2WS9QFNR8VMJZY6VWWFZNPKN7ZTVP746BMXJF7A",
+    "recipient": "SP000000000000000000002Q6VF78",
     "contract_id": "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-deposit",
     "function_name": "complete-deposit-wrapper"
   },
@@ -168,7 +168,7 @@ An sBTC deposit, where the amount comes from the mint event rather than the call
   "block_height": 6482551,
   "timestamp": "2026-02-11T13:27:23Z",
   "participants": [
-    { "address": "SP2WS9QFNR8VMJZY6VWWFZNPKN7ZTVP746BMXJF7A", "role": "recipient" },
+    { "address": "SP000000000000000000002Q6VF78", "role": "recipient" },
     { "address": "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-deposit", "role": "contract" }
   ]
 }
